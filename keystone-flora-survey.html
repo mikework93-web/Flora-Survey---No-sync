@@ -24,8 +24,8 @@
   --sans: system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
 }
 *{box-sizing:border-box}
-/* Belt-and-braces: an element's own `display` rule (e.g. .live-pill,
-   .live-banner) otherwise beats the browser's default `[hidden]` styling
+/* Belt-and-braces: an element's own `display` rule (e.g. .live-banner)
+   otherwise beats the browser's default `[hidden]` styling
    because author CSS always outranks user-agent CSS regardless of
    specificity — so without this, setting `.hidden = true` in JS would stop
    being visually respected the moment a class also sets `display`. */
@@ -137,9 +137,11 @@ button.x{background:none;border:none;color:var(--red);font-size:18px;font-weight
 .brief-line .brief-id{font-size:10px;color:var(--muted);opacity:.65}
 .brief-chev{color:var(--muted);flex-shrink:0;font-size:15px;line-height:1}
 
-/* Sticky, hard-to-miss notice when Team Sync's connection drops or actually
-   ends — a small pill alone is easy to miss mid-survey, so this is a full-width
-   fixed banner instead (see renderLiveBanner()). */
+/* Sticky, hard-to-miss notice for a storage-save failure — a toast alone is
+   easy to miss mid-survey (it fades in under 2 seconds), so this is a
+   full-width fixed banner instead (see showStorageWarning()). Class name is
+   a holdover from this app's earlier Team Sync connection-status banner,
+   which used the same fixed/full-width treatment for the same reason. */
 .live-banner{position:fixed;top:0;left:0;right:0;z-index:400;background:var(--red);color:#fff;
   padding:10px 16px;font-size:13px;font-weight:600;text-align:center;display:flex;align-items:center;
   justify-content:center;gap:10px;flex-wrap:wrap;box-shadow:0 3px 10px rgba(0,0,0,.3)}
@@ -147,14 +149,6 @@ button.x{background:none;border:none;color:var(--red);font-size:18px;font-weight
   font-size:12px;font-weight:700;cursor:pointer;font-family:var(--sans);flex-shrink:0}
 
 .added-by{font-style:normal;color:var(--muted);font-size:10.5px}
-.live-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.live-pill{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.3px;padding:2px 8px;
-  border-radius:10px;background:#eee;color:var(--muted);text-transform:none;vertical-align:middle}
-.live-pill.on{background:#e7f0e3;color:#3a7a4a}
-.live-pill.err{background:var(--red-bg);color:var(--red)}
-.live-code{font:700 24px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:4px;
-  background:var(--cream);border:1px dashed var(--gold-dark);border-radius:8px;padding:12px 14px;
-  text-align:center;color:var(--charcoal-deep)}
 .field-notes-input{width:100%;min-height:70px;border:1px solid var(--border);border-radius:5px;
   padding:8px 10px;font-size:13px;font-family:var(--sans);resize:vertical;background:#fff;color:var(--ink)}
 .field-notes-input:focus{outline:none;border-color:var(--gold)}
@@ -211,9 +205,6 @@ button.x{background:none;border:none;color:var(--red);font-size:18px;font-weight
   #fh-bar .grow{flex:1 1 100%;font-size:11.5px}
   #fh-bar .actions{gap:6px;flex:1 1 100%}
   #fh-bar .actions .btn{flex:1 1 auto;padding:7px 8px;font-size:11px;text-align:center}
-  .live-row{flex-direction:column;align-items:stretch}
-  .live-row input, .live-row button{max-width:none!important;width:100%}
-  .live-row span{text-align:center}
 }
 </style>
 </head>
@@ -242,7 +233,7 @@ button.x{background:none;border:none;color:var(--red);font-size:18px;font-weight
       <input id="pick" type="text" placeholder="Search common or scientific name… (or type a new name)" autocomplete="off">
       <div class="pick-list" id="pickList"></div>
     </div>
-    <p class="muted" style="margin:8px 0 0">Tap a species to add it to the checklist. Names not in the reference list are added as free text and tagged invasive — change the origin in the table if needed. Typed names are automatically highlighted in red when exported to Excel; they can also be ticked <b>Uncertain</b> in the checklist below if you're not fully confident of the identification.</p>
+    <p class="muted" style="margin:8px 0 0">Tap a species to add it to the checklist. Names not in the reference list are added as free text and tagged invasive — change the origin in the table if needed. Typed names are automatically highlighted in red when exported to Excel; any species can also be ticked <b>Uncertain</b> in the checklist below (same red highlight) if you're not fully confident of the identification.</p>
   </div>
 
   <div class="card">
@@ -539,70 +530,6 @@ window.FHKit = (function(){
   }
 
   /* Save/Load manager — builds buttons in #fh-bar and handles storage */
-  function manager(opts){
-    const KEY = opts.key, WORKING = "fh_"+KEY+"_working", SAVED = "fh_"+KEY+"_saved";
-    const bar = document.getElementById("fh-bar");
-    const getSaved = ()=>{ try{ return JSON.parse(localStorage.getItem(SAVED))||{}; }catch(e){ return {}; } };
-    const putSaved = o => { try{ localStorage.setItem(SAVED, JSON.stringify(o)); }catch(e){} };
-
-    let at=null;
-    function autosave(){
-      clearTimeout(at);
-      at = setTimeout(()=>{ try{ localStorage.setItem(WORKING, JSON.stringify(opts.snapshot())); }catch(e){} }, 400);
-    }
-    function save(){
-      let name = prompt("Name this saved sheet:", opts.suggestName ? opts.suggestName() : "");
-      if(name==null) return; name = name.trim(); if(!name) return;
-      const o = getSaved();
-      if(o[name] && !confirm("A saved sheet called \""+name+"\" exists. Overwrite it?")) return;
-      o[name] = opts.snapshot();
-      putSaved(o); toast("Saved \u201C"+name+"\u201D");
-    }
-    function load(){
-      const o = getSaved();
-      const names = Object.keys(o).sort((a,b)=> new Date(o[b].savedAt||0) - new Date(o[a].savedAt||0));
-      if(!names.length){ toast("No saved sheets yet"); return; }
-      const ov = document.createElement("div"); ov.className="fh-modal";
-      ov.innerHTML = '<div class="fh-modal-card"><h3>Saved sheets</h3><div class="fh-modal-list">'
-        + names.map(n=>'<div class="fh-modal-row"><span>'+esc(n)
-            + (o[n].savedAt ? '<small> &middot; '+new Date(o[n].savedAt).toLocaleDateString()+'</small>' : '')
-            + '</span><span><button data-load="'+esc(n)+'">Load</button>'
-            + '<button class="del" data-del="'+esc(n)+'">Delete</button></span></div>').join("")
-        + '</div><div class="fh-modal-foot"><button class="ghost" data-close="1">Close</button></div></div>';
-      document.body.appendChild(ov);
-      ov.addEventListener("click", e=>{
-        if(e.target===ov || e.target.dataset.close){ ov.remove(); return; }
-        const ln = e.target.dataset.load, dn = e.target.dataset.del;
-        if(ln){ opts.restore(o[ln]); autosave(); toast("Loaded \u201C"+ln+"\u201D"); ov.remove(); }
-        if(dn && confirm("Delete saved sheet \""+dn+"\"?")){
-          delete o[dn]; putSaved(o);
-          const row = e.target.closest(".fh-modal-row"); if(row) row.remove();
-          if(!Object.keys(o).length) ov.remove();
-        }
-      });
-    }
-    function newSheet(){
-      if(!confirm("Start a new, empty sheet?\n\nSave first if you want to keep the current one.")) return;
-      try{ localStorage.removeItem(WORKING); }catch(e){}
-      location.reload();
-    }
-    bar.innerHTML = '<strong class="grow">'+esc(opts.title||"")+'</strong>'
-      + '<button class="btn sec" id="fhNew">New</button>'
-      + '<button class="btn sec" id="fhLoad">Load</button>'
-      + '<button class="btn sec" id="fhCsv">'+esc(opts.exportLabel||"CSV")+'</button>'
-      + '<button class="btn" id="fhSave">Save</button>';
-    bar.querySelector("#fhNew").onclick  = newSheet;
-    bar.querySelector("#fhLoad").onclick = load;
-    bar.querySelector("#fhSave").onclick = save;
-    bar.querySelector("#fhCsv").onclick  = ()=>{ if(opts.exportCSV) opts.exportCSV(); };
-
-    let working = null;
-    try{ working = JSON.parse(localStorage.getItem(WORKING)); }catch(e){}
-    if(working) { try{ opts.restore(working); }catch(e){} }
-
-    return { autosave, save, load };
-  }
-
   /* ---- Minimal, dependency-free .xlsx writer -------------------------------
      Real Excel files need actual cell styling to show colored text — plain
      CSV can't carry that. Rather than pull in a third-party spreadsheet
@@ -1061,7 +988,7 @@ window.FHKit = (function(){
   function getLastShareDiagnostic(){ return lastShareDiagnostic; }
 
 
-  return { esc, today, toast, downloadCSV, downloadXLSX, downloadZip, buildXLSXBlob, buildZipBlob, buildGeoPackageBlob, buildGeoPackageBytes, triggerDownload, shareFiles, getLastShareDiagnostic, buildPicker, manager, consLabel, consBadge };
+  return { esc, today, toast, downloadCSV, downloadXLSX, downloadZip, buildXLSXBlob, buildZipBlob, buildGeoPackageBlob, buildGeoPackageBytes, triggerDownload, shareFiles, getLastShareDiagnostic, buildPicker, consLabel, consBadge };
 })();
 
 </script>
@@ -1082,7 +1009,7 @@ window.FHKit = (function(){
   // updated (any change is enough — it's just compared, never parsed) and
   // the app will notice on its own and offer a one-tap update instead of
   // needing manual cache-clearing steps.
-  const BUILD_VERSION = "2026-09-17.5";
+  const BUILD_VERSION = "2026-09-17.6";
   const UPDATE_CHECK_KEY = "fh_florasurvey_lastupdatecheck"; // matches this app's other fh_florasurvey_* keys
   // force=true skips the 20-min throttle and reports back what it found —
   // used by the manual "Check for updates" tap below, for when the passive
@@ -1142,11 +1069,23 @@ window.FHKit = (function(){
   function makePointId(){ return "P"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
 
   function makeFolderKey(){ return "s_"+Date.now()+"_"+Math.random().toString(36).slice(2,8); }
+  // Random 4-character suffix over a same-day date stamp — comfortable odds
+  // for a typical day's species count, but a big single-day survey (a few
+  // hundred species) pushes the birthday-paradox collision chance up into
+  // low single-digit percent, and two records sharing an ID would mean
+  // their photos collide in the export zip (photos are named by record ID).
+  // Checking against every record ID already in use THIS survey and
+  // retrying closes that off entirely rather than leaving it to chance.
   function makeRecordId(){
     const d = new Date();
     const ymd = String(d.getFullYear()).slice(2) + String(d.getMonth()+1).padStart(2,"0") + String(d.getDate()).padStart(2,"0");
-    const rand = Math.random().toString(36).slice(2,6).toUpperCase();
-    return "FS-"+ymd+"-"+rand;
+    const used = new Set((rows||[]).map(r=>r.id));
+    let id;
+    do{
+      const rand = Math.random().toString(36).slice(2,6).toUpperCase();
+      id = "FS-"+ymd+"-"+rand;
+    }while(used.has(id));
+    return id;
   }
   function getFolder(){ try{ return JSON.parse(localStorage.getItem(FOLDER_KEY))||{}; }catch(e){ return {}; } }
   function putFolder(o){ localStorage.setItem(FOLDER_KEY, JSON.stringify(o)); }
@@ -1269,9 +1208,17 @@ window.FHKit = (function(){
     if(!s) return; const m = s.meta||{};
     folderKey = s.folderKey || s.id || makeFolderKey();
     $("site").value=m.site||""; $("date").value=m.date||FHKit.today();
+    // makeRecordId() only guards against colliding with IDs already in the
+    // in-memory `rows` — no help while `rows` itself is mid-replacement here,
+    // so a legacy survey migrating several IDless records in the same pass
+    // needs its own running set to keep THOSE from colliding with each other.
+    const migratedIds = new Set();
     rows = (s.species||[]).map(r=>{
       const o = Object.assign({}, r);
-      if(!o.id) o.id = makeRecordId();                          // migrate older records lacking one
+      if(!o.id){                                                 // migrate older records lacking one
+        do{ o.id = makeRecordId(); }while(migratedIds.has(o.id));
+      }
+      migratedIds.add(o.id);
       o.photos = Array.isArray(o.photos) ? o.photos.map(p=>Object.assign({},p)) : [];
       // Migrate an older single-point record (r.lat/r.lon) into the new
       // multi-point r.points array; leave anything already on the new shape alone.
@@ -1679,6 +1626,20 @@ window.FHKit = (function(){
     return String(s||"").trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g," ").trim();
   }
   async function exportSurvey(){
+    try{
+      await exportSurveyInner();
+    }catch(e){
+      // Nothing here should normally throw, but this is the one place a
+      // silent failure would be worst — clicking Export and having
+      // NOTHING happen, with no error and no clue why, is exactly the
+      // kind of silent data-loss-adjacent failure this app has otherwise
+      // gone out of its way to eliminate (see the storage-warning banner).
+      // A visible failure the person can report beats a button that just
+      // does nothing.
+      FHKit.toast("Export failed — please try again. If it keeps happening, get in touch and mention: "+(e&&e.message||e));
+    }
+  }
+  async function exportSurveyInner(){
     const m = meta();
     const sheet = [], styles = [];
     const push = (cells, style) => { sheet.push(cells); styles.push(style||null); };
@@ -1727,21 +1688,38 @@ window.FHKit = (function(){
       .flatMap(r=> r.points.map(p=> ({ id:r.id, sci:r.sci, common:r.common||r.sci, lat:p.lat, lon:p.lon })));
     const hasPoints = geoPoints.length > 0;
     let zipBlob = null;
+    let pointsIncluded = hasPoints;
     if(hasPhotos || hasPoints){
       const zipFiles = Object.assign({}, photoFiles);
       if(hasPoints){
-        zipFiles["species_points.gpkg"] = FHKit.buildGeoPackageBytes({
-          tableName: "species_points",
-          identifier: "Flora Survey — "+(m.site||"Site")+" — "+(m.date||FHKit.today()),
-          description: "Species observation points for this Keystone Conservation flora survey.",
-          points: geoPoints
-        });
+        try{
+          zipFiles["species_points.gpkg"] = FHKit.buildGeoPackageBytes({
+            tableName: "species_points",
+            identifier: "Flora Survey — "+(m.site||"Site")+" — "+(m.date||FHKit.today()),
+            description: "Species observation points for this Keystone Conservation flora survey.",
+            points: geoPoints
+          });
+        }catch(e){
+          // This survey has more captured GPS points than fit in one
+          // GeoPackage file (a real, if unusual, ceiling — see
+          // buildGeoPackageBytes). Don't let that take down the whole
+          // export: still deliver the Excel file and any photos, just
+          // without the GPS points this one time, and say so clearly
+          // rather than failing silently or losing the photos too.
+          pointsIncluded = false;
+          FHKit.toast("This survey has too many GPS points for one GeoPackage file — the Excel file"+(hasPhotos?" and photos":"")+" exported fine, but GPS points were left out this time.");
+        }
       }
-      zipBlob = FHKit.buildZipBlob(zipFiles);
+      // Only actually produce a zip if it ends up with something in it — if
+      // the only reason we got here was a GeoPackage that then failed to
+      // build (caught above), and there were no photos either, an empty
+      // zip would otherwise get offered alongside the Excel file for no
+      // reason.
+      if(Object.keys(zipFiles).length) zipBlob = FHKit.buildZipBlob(zipFiles);
     }
     const zipFilename = baseName+" photos.zip";
 
-    showExportChooser({ xlsxBlob, xlsxFilename, zipBlob, zipFilename, site:m.site, date:m.date, hasPhotos, hasPoints });
+    showExportChooser({ xlsxBlob, xlsxFilename, zipBlob, zipFilename, site:m.site, date:m.date, hasPhotos, hasPoints:pointsIncluded });
   }
   // Lets the user pick "Email / Share" (OS share sheet — e.g. Mail, with the
   // file(s) already attached) or "Download to device" (plain file download).
