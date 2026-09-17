@@ -1082,7 +1082,7 @@ window.FHKit = (function(){
   // updated (any change is enough — it's just compared, never parsed) and
   // the app will notice on its own and offer a one-tap update instead of
   // needing manual cache-clearing steps.
-  const BUILD_VERSION = "2026-09-17.3";
+  const BUILD_VERSION = "2026-09-17.5";
   const UPDATE_CHECK_KEY = "fh_florasurvey_lastupdatecheck"; // matches this app's other fh_florasurvey_* keys
   // force=true skips the 20-min throttle and reports back what it found —
   // used by the manual "Check for updates" tap below, for when the passive
@@ -1165,13 +1165,25 @@ window.FHKit = (function(){
   // failure impossible to miss instead: it goes up the moment a save fails
   // and stays up — even across a reload, since it's checked again on
   // startup — until a save actually succeeds again.
-  function showStorageWarning(){
+  // Two independent things can fail to save: the survey data itself
+  // (localStorage — species, notes, GPS points) and a photo (IndexedDB).
+  // Tracking which reasons are currently failing — rather than one shared
+  // on/off flag — matters because photos and everything else now save to
+  // separate storage: without this, an unrelated successful autosave (which
+  // no longer touches photos at all) would silently clear a banner that was
+  // raised specifically because a photo couldn't be saved, masking a still-
+  // real problem. The banner stays up until every failing reason clears.
+  const storageFailureReasons = new Set();
+  function showStorageWarning(reason){
+    storageFailureReasons.add(reason||"general");
     const el = $("storageWarningBanner");
     if(!el) return;
     el.hidden = false;
     el.textContent = "⚠️ This survey stopped saving on this device (storage is full) — everything already saved is safe, but anything added from now on could be lost if you close or reload this page. Export a copy now, then free up space on your device.";
   }
-  function clearStorageWarning(){
+  function clearStorageWarning(reason){
+    storageFailureReasons.delete(reason||"general");
+    if(storageFailureReasons.size) return;   // still failing for another reason
     const el = $("storageWarningBanner");
     if(el && !el.hidden) el.hidden = true;
   }
@@ -1188,8 +1200,8 @@ window.FHKit = (function(){
         if(($("site").value||"").trim()){
           const o = getFolder(); o[folderKey] = snap; putFolder(o);
         }
-        clearStorageWarning();
-      }catch(e){ showStorageWarning(); }
+        clearStorageWarning("localStorage");
+      }catch(e){ showStorageWarning("localStorage"); }
     }, 400);
   }
   function saveToFolder(){
@@ -1197,10 +1209,10 @@ window.FHKit = (function(){
     o[folderKey] = snapshot();
     try{
       putFolder(o);
-      clearStorageWarning();
+      clearStorageWarning("localStorage");
       FHKit.toast("Saved to survey folder");
     }catch(e){
-      showStorageWarning();
+      showStorageWarning("localStorage");
       FHKit.toast("Couldn't save — storage is full. Export a copy now to avoid losing anything.");
     }
     autosave();
@@ -1239,7 +1251,7 @@ window.FHKit = (function(){
       if(ln){ restore(o[ln]); autosave(); FHKit.toast("Loaded survey"); ov.remove(); }
       if(dn && confirm("Delete this saved survey?")){
         delete o[dn];
-        try{ putFolder(o); clearStorageWarning(); }catch(e){ showStorageWarning(); }
+        try{ putFolder(o); clearStorageWarning("localStorage"); }catch(e){ showStorageWarning("localStorage"); }
         const row = e.target.closest(".fh-modal-row"); if(row) row.remove();
         if(!Object.keys(o).length) ov.remove();
       }
@@ -1405,7 +1417,19 @@ window.FHKit = (function(){
         // a full photo that was never actually kept anywhere.
         await putPhotoBytes(id, full);
         r.photos.push({ id, thumb, addedAt:new Date().toISOString() });
-      }catch(e){ FHKit.toast("Couldn't save a photo — check your device's available storage"); }
+        clearStorageWarning("photo");
+      }catch(e){
+        // A failed photo save gets the same persistent banner as a failed
+        // autosave, not just a toast — a toast fades in under 2 seconds,
+        // which is exactly the kind of easy-to-miss-in-the-field failure
+        // that caused the original silent photo/record loss this whole
+        // storage rework exists to prevent. Tagged "photo" (not
+        // "localStorage") so an unrelated successful autosave — which no
+        // longer touches photos at all — can't silently clear a warning
+        // that's actually about the separate IndexedDB photo store.
+        showStorageWarning("photo");
+        FHKit.toast("Couldn't save a photo — check your device's available storage");
+      }
     }
     render();
     autosave();
@@ -1751,15 +1775,43 @@ window.FHKit = (function(){
       const shared = await FHKit.shareFiles(items, subject, "Attached: "+filesNote+" from the Keystone Conservation Flora Survey tool.");
       close();
       if(shared) return;
-      // This browser can't attach files to a share/email directly (e.g. desktop
-      // Firefox, or an Android browser whose share sheet didn't cooperate) —
-      // download them instead and open a blank email to attach them to.
+      // This browser can't attach files to a share/email directly — true of
+      // essentially every DESKTOP browser (there is simply no web API that
+      // lets a page attach a file to the OS's own mail client), and true of
+      // some Android browsers too. Download the files, then make the "you
+      // still need to attach these yourself" step impossible to miss: a
+      // blocking confirmation that names the exact files, rather than a
+      // toast that's easy to miss while the mail app is popping up at the
+      // same time — a toast-only version of this previously led to a real
+      // email going out in the field with nothing attached.
       FHKit.triggerDownload(ctx.xlsxBlob, ctx.xlsxFilename);
       if(ctx.zipBlob) setTimeout(()=>FHKit.triggerDownload(ctx.zipBlob, ctx.zipFilename), 300);
-      const diag = FHKit.getLastShareDiagnostic();
-      FHKit.toast("Your browser can't attach files to email directly"+(diag?" ("+diag+")":"")+" — downloaded instead; please attach manually");
-      window.location.href = "mailto:?subject="+encodeURIComponent(subject)
-        +"&body="+encodeURIComponent("Please attach "+filesNote+" (just downloaded) to this email.");
+      showManualAttachReminder({ subject, filesNote, xlsxFilename: ctx.xlsxFilename, zipFilename: ctx.zipBlob ? ctx.zipFilename : null });
+    });
+  }
+  // A blocking reminder shown once this browser has proven it can't attach
+  // files to email automatically. By the time this shows, the files are
+  // already sitting in Downloads — this names them explicitly and requires
+  // an explicit tap before the email even opens, so attaching them isn't
+  // something that's easy to skip past without noticing.
+  function showManualAttachReminder(ctx){
+    const files = [ctx.xlsxFilename].concat(ctx.zipFilename ? [ctx.zipFilename] : []);
+    const ov = document.createElement("div"); ov.className="fh-modal";
+    ov.innerHTML = '<div class="fh-modal-card"><h3>Attach these before sending</h3>'
+      + '<div style="padding:16px 18px">'
+      + '<p class="muted" style="margin:0 0 10px">This browser can’t attach files to an email automatically. These were just downloaded to your device (check your Downloads folder):</p>'
+      + '<ul style="margin:0 0 14px;padding-left:20px">'+files.map(f=>'<li><b>'+FHKit.esc(f)+'</b></li>').join("")+'</ul>'
+      + '<p class="muted" style="margin:0 0 14px">Click <b>Open Email</b> below, then drag those file(s) into the email <u>before</u> you hit send — an empty email with nothing attached is the one thing this step is here to prevent.</p>'
+      + '<button type="button" class="btn" id="attachOpenEmail" style="width:100%">Open Email</button>'
+      + '</div>'
+      + '<div class="fh-modal-foot"><button class="ghost" data-close="1">Close</button></div></div>';
+    document.body.appendChild(ov);
+    const close = ()=> ov.remove();
+    ov.addEventListener("click", e=>{ if(e.target===ov || e.target.dataset.close) close(); });
+    ov.querySelector("#attachOpenEmail").addEventListener("click", ()=>{
+      window.location.href = "mailto:?subject="+encodeURIComponent(ctx.subject)
+        +"&body="+encodeURIComponent("Please attach "+ctx.filesNote+" (just downloaded to this device) to this email before sending.");
+      close();
     });
   }
 
@@ -1864,6 +1916,19 @@ window.FHKit = (function(){
   renderSiteNotes();
   autosave();   // an immediate save attempt on load — surfaces the storage-full warning right away if it's
                 // already a problem, rather than waiting for the next edit to discover it
+  // Ask the browser not to auto-evict this site's storage (localStorage +
+  // the IndexedDB photo store) under disk pressure — without this, a device
+  // that's low on space can silently clear an unvisited site's data to make
+  // room, which is a real risk for a field survey that might sit untouched
+  // for a few days mid-trip. Best-effort only: several browsers (notably
+  // iOS Safari) don't implement this API at all and just skip it quietly,
+  // and even granted "persistent" storage isn't an absolute guarantee — but
+  // it meaningfully lowers the odds on the browsers that do support it
+  // (Chrome/Edge on Android and desktop). Exporting a copy regularly is
+  // still the one truly reliable backup, on every platform.
+  try{
+    if(navigator.storage && navigator.storage.persist) navigator.storage.persist();
+  }catch(e){}
   // Visible on the page itself, with no network needed — the most reliable
   // way for two people to confirm they're on the exact same build: put your
   // phones side by side and compare this line. checkForUpdate() below only
